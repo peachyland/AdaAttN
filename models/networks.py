@@ -3,6 +3,7 @@ import torch.nn as nn
 import functools
 from torch.nn import init
 from torch.optim import lr_scheduler
+import pickle
 
 
 def get_scheduler(optimizer, opt):
@@ -148,6 +149,34 @@ class AdaAttN(nn.Module):
         std = std.view(b, h, w, -1).permute(0, 3, 1, 2).contiguous()
         return std * mean_variance_norm(content) + mean
 
+    def adv_forward(self, content, style, content_key, style_key, seed=None):
+        F = self.f(content_key)
+        G = self.g(style_key)
+        H = self.h(style)
+        b, _, h_g, w_g = G.size()
+        G = G.view(b, -1, w_g * h_g).contiguous()
+        if w_g * h_g > self.max_sample:
+            if seed is not None:
+                torch.manual_seed(seed)
+            index = torch.randperm(w_g * h_g).to(content.device)[:self.max_sample]
+            G = G[:, :, index]
+            style_flat = H.view(b, -1, w_g * h_g)[:, :, index].transpose(1, 2).contiguous()
+        else:
+            style_flat = H.view(b, -1, w_g * h_g).transpose(1, 2).contiguous()
+        b, _, h, w = F.size()
+        F = F.view(b, -1, w * h).permute(0, 2, 1)
+        S = torch.bmm(F, G)
+        # S: b, n_c, n_s
+        S = self.sm(S)
+        # mean: b, n_c, c
+        mean = torch.bmm(S, style_flat)
+        # std: b, n_c, c
+        std = torch.sqrt(torch.relu(torch.bmm(S, style_flat ** 2) - mean ** 2))
+        # mean, std: b, c, h, w
+        mean = mean.view(b, h, w, -1).permute(0, 3, 1, 2).contiguous()
+        std = std.view(b, h, w, -1).permute(0, 3, 1, 2).contiguous()
+        return mean, std
+
 
 class Transformer(nn.Module):
 
@@ -162,9 +191,20 @@ class Transformer(nn.Module):
 
     def forward(self, content4_1, style4_1, content5_1, style5_1,
                 content4_1_key, style4_1_key, content5_1_key, style5_1_key, seed=None):
-        return self.merge_conv(self.merge_conv_pad(
-            self.attn_adain_4_1(content4_1, style4_1, content4_1_key, style4_1_key, seed=seed) +
-            self.upsample5_1(self.attn_adain_5_1(content5_1, style5_1, content5_1_key, style5_1_key, seed=seed))))
+        return self.merge_conv(
+                    self.merge_conv_pad(
+                        self.attn_adain_4_1(content4_1, style4_1, content4_1_key, style4_1_key, seed=seed) +
+                        self.upsample5_1(
+                                self.attn_adain_5_1(content5_1, style5_1, content5_1_key, style5_1_key, seed=seed)
+                            )
+                        )
+                    )
+
+    def adv_forward(self, content4_1, style4_1, content5_1, style5_1,
+                content4_1_key, style4_1_key, content5_1_key, style5_1_key, seed=None):
+        mean1, std1 = self.attn_adain_4_1.adv_forward(content4_1, style4_1, content4_1_key, style4_1_key, seed=seed)
+        mean2, std2 = self.attn_adain_5_1.adv_forward(content5_1, style5_1, content5_1_key, style5_1_key, seed=seed)
+        return mean1, std1, mean2, std2
 
 
 class Decoder(nn.Module):

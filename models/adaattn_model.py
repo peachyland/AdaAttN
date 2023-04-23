@@ -150,11 +150,12 @@ class AdaAttNModel(BaseModel):
             return networks.mean_variance_norm(feats[last_layer_idx])
 
     def forward(self):
+        # self.s = torch.load('/egr/research-dselab/renjie3/renjie/diffusion/style_transfer/AdaAttN/temp_datasets/styles/14adv.pt')
         self.c_feats = self.encode_with_intermediate(self.c)
         self.s_feats = self.encode_with_intermediate(self.s)
         if self.opt.skip_connection_3:
-            c_adain_feat_3 = self.net_adaattn_3(self.c_feats[2], self.s_feats[2], self.get_key(self.c_feats, 2, self.opt.shallow_layer),
-                                                   self.get_key(self.s_feats, 2, self.opt.shallow_layer), self.seed)
+            c_adain_feat_3 = self.net_adaattn_3(self.c_feats[2], self.s_feats[2], self.get_key(self.c_feats, 2, self.opt.shallow_layer), self.get_key(self.s_feats, 2, self.opt.shallow_layer), self.seed)
+            # print("check here")
         else:
             c_adain_feat_3 = None
         cs = self.net_transformer(self.c_feats[3], self.s_feats[3], self.c_feats[4], self.s_feats[4],
@@ -163,6 +164,79 @@ class AdaAttNModel(BaseModel):
                                   self.get_key(self.c_feats, 4, self.opt.shallow_layer),
                                   self.get_key(self.s_feats, 4, self.opt.shallow_layer), self.seed)
         self.cs = self.net_decoder(cs, c_adain_feat_3)
+
+    def adv(self):
+        # print(torch.min(self.s))
+        # print(torch.max(self.s))
+        # # print(self.c.shape)
+        # input("check adv")
+        self.c_feats = self.encode_with_intermediate(self.c)
+        self.s_feats = self.encode_with_intermediate(self.s)
+        c_adain_feat_3 = None
+
+        flag_loss_use_content = False
+
+        if flag_loss_use_content:
+
+            mean_org0, std_org0 = self.net_adaattn_3.module.adv_forward(self.c_feats[2], self.s_feats[2], self.get_key(self.c_feats, 2, self.opt.shallow_layer), self.get_key(self.s_feats, 2, self.opt.shallow_layer), self.seed)
+            mean_org1, std_org1, mean_org2, std_org2 = self.net_transformer.module.adv_forward(self.c_feats[3], self.s_feats[3], self.c_feats[4], self.s_feats[4], self.get_key(self.c_feats, 3, self.opt.shallow_layer), self.get_key(self.s_feats, 3, self.opt.shallow_layer), self.get_key(self.c_feats, 4, self.opt.shallow_layer), self.get_key(self.s_feats, 4, self.opt.shallow_layer), self.seed)
+
+        else:
+
+            mean_org0, std_org0 = networks.calc_mean_std(self.s_feats[2])
+            mean_org1, std_org1 = networks.calc_mean_std(self.s_feats[3])
+            mean_org2, std_org2 = networks.calc_mean_std(self.s_feats[4])
+
+
+        epsilon = 8.0 / 255.0
+        alpha = 0.8 / 255.0
+
+        def adv_loss(org_mean1, org_std1, adv_mean1, adv_std1):
+            return torch.mean((org_mean1.mean(dim=(2, 3)) - adv_mean1.mean(dim=(2, 3))) ** 2) + \
+                    torch.mean((org_std1.mean(dim=(2, 3)) - adv_std1.mean(dim=(2, 3))) ** 2)
+            # return torch.mean((org_mean1 - adv_mean1) ** 2) + \
+            #         torch.mean((org_std1 - adv_std1) ** 2)
+
+        x_adv = self.s.detach() + 0.001 * torch.randn(self.s.shape).cuda().detach()
+        for _step in range(50):
+            print(_step)
+            x_adv.requires_grad_()
+            # loss_1 = net_AdaIN.calc_adv_loss(style_feats_AdaIN, x_adv)
+            # loss_2 = net_CAST.calc_adv_loss(style_feats_CAST, x_adv) #[TODO]x_adv * 2
+            self.s_adv_feats = self.encode_with_intermediate(x_adv)
+
+            if flag_loss_use_content:
+            
+                mean_adv0, std_adv0 = self.net_adaattn_3.module.adv_forward(self.c_feats[2], self.s_adv_feats[2], self.get_key(self.c_feats, 2, self.opt.shallow_layer), self.get_key(self.s_adv_feats, 2, self.opt.shallow_layer), self.seed)
+                mean_adv1, std_adv1, mean_adv2, std_adv2 = self.net_transformer.module.adv_forward(self.c_feats[3], self.s_adv_feats[3], self.c_feats[4], self.s_adv_feats[4], self.get_key(self.c_feats, 3, self.opt.shallow_layer), self.get_key(self.s_adv_feats, 3, self.opt.shallow_layer), self.get_key(self.c_feats, 4, self.opt.shallow_layer), self.get_key(self.s_adv_feats, 4, self.opt.shallow_layer), self.seed)
+                # print(mean_adv1.shape, std_adv1.shape, mean_adv2.shape, std_adv2.shape)
+            
+            else:
+                
+                mean_adv0, std_adv0 = networks.calc_mean_std(self.s_adv_feats[2])
+                mean_adv1, std_adv1 = networks.calc_mean_std(self.s_adv_feats[3])
+                mean_adv2, std_adv2 = networks.calc_mean_std(self.s_adv_feats[4])
+
+            loss = 10 * adv_loss(mean_org0, std_org0, mean_adv0, std_adv0) + 2 * adv_loss(mean_org1, std_org1, mean_adv1, std_adv1) + adv_loss(mean_org2, std_org2, mean_adv2, std_adv2)
+            grad = torch.autograd.grad(loss, [x_adv])[0].detach()
+            # grad = grad / len(contents)
+            x_adv = x_adv.detach() + alpha * torch.sign(grad)
+            # x_adv = x_adv.detach() - alpha * torch.sign(grad.detach())
+
+            print(loss.item())
+
+            x_adv = torch.min(torch.max(x_adv, self.s - epsilon), self.s + epsilon)
+            x_adv = torch.clamp(x_adv, 0, 1.0)
+            # if _step == 49:
+            #     print(loss.item())
+            self.net_transformer.zero_grad()
+
+        import torchvision
+        torchvision.utils.save_image(x_adv[0], '/egr/research-dselab/renjie3/renjie/diffusion/style_transfer/AdaAttN/temp_datasets/styles/14adv.png')
+        torch.save(x_adv, '/egr/research-dselab/renjie3/renjie/diffusion/style_transfer/AdaAttN/temp_datasets/styles/14adv.pt')
+        print("adv done")
+        exit()
+        # print("{:s}: save attack_{:s}.png".format(str(i), style_name))
 
     def compute_content_loss(self, stylized_feats):
         self.loss_content = torch.tensor(0., device=self.device)

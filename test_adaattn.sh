@@ -1,6 +1,6 @@
-python test.py \
---content_path datasets/contents \
---style_path datasets/styles \
+CUDA_VISIBLE_DEVICES='1' python test.py \
+--content_path datasets/c_14 \
+--style_path datasets/abacus \
 --name AdaAttN \
 --model adaattn \
 --dataset_mode unaligned \
